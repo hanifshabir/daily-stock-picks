@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import smtplib
 from datetime import datetime, timezone
+from email.message import EmailMessage
 from pathlib import Path
 
 import pandas as pd
@@ -86,6 +88,26 @@ def send_telegram_message(text: str) -> None:
     response.raise_for_status()
 
 
+def send_email_report(subject: str, body: str) -> None:
+    email_from = os.getenv("EMAIL_FROM")
+    email_to = os.getenv("EMAIL_TO")
+    email_app_password = os.getenv("EMAIL_APP_PASSWORD")
+
+    if not email_from or not email_to or not email_app_password:
+        print("Email secrets not configured; skipping email delivery.")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = email_from
+    msg["To"] = email_to
+    msg.set_content(body)
+
+    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
+        smtp.login(email_from, email_app_password)
+        smtp.send_message(msg)
+
+
 def build_telegram_text(picks: list[PickResult], generated_at: str) -> str:
     if not picks:
         return f"Daily Stock Picks\n{generated_at}\n\nNo strong candidates today."
@@ -142,6 +164,10 @@ def main() -> int:
 
     telegram_text = build_telegram_text(top_picks, generated_at)
     send_telegram_message(telegram_text)
+    send_email_report(
+        subject=f"Daily Stock Picks - {generated_at}",
+        body=report,
+    )
 
     print(report)
     print(f"\nSaved report to {report_path}")
