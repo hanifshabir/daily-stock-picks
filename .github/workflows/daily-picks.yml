@@ -3,8 +3,7 @@ name: Daily Stock Picks
 on:
   workflow_dispatch:
   schedule:
-    - cron: "23 9 * * 1-5"
-      timezone: "America/New_York"
+    - cron: "*/5 * * * *"
 
 jobs:
   run-daily-picks:
