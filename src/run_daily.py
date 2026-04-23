@@ -10,6 +10,7 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import pandas as pd
 import requests
+import snowflake.connector
 import yfinance as yf
 
 from strategy import PickResult, score_symbol
@@ -19,6 +20,10 @@ ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT / "output"
 CHART_DIR = OUTPUT_DIR / "charts"
 WATCHLIST_PATH = ROOT / "watchlist.json"
+
+
+def log_status(stage: str, message: str) -> None:
+    print(f"[{stage}] {message}", flush=True)
 
 
 def load_watchlist() -> list[str]:
@@ -55,6 +60,47 @@ def build_dataframe(results: list[PickResult]) -> pd.DataFrame:
         for pick in results
     ]
     return pd.DataFrame(rows)
+
+
+def prepare_snowflake_dataframe(results_df: pd.DataFrame, generated_at_iso: str) -> pd.DataFrame:
+    if results_df.empty:
+        return pd.DataFrame()
+
+    upload_df = results_df.copy()
+    upload_df["run_ts"] = generated_at_iso
+    upload_df.columns = [
+        "symbol",
+        "action",
+        "score",
+        "last_price",
+        "from_open_pct",
+        "vs_prior_close_pct",
+        "return_5d_pct",
+        "return_20d_pct",
+        "daily_volume_ratio",
+        "intraday_volume_ratio",
+        "vwap_gap_pct",
+        "reason",
+        "run_ts",
+    ]
+    upload_df = upload_df[
+        [
+            "run_ts",
+            "symbol",
+            "action",
+            "score",
+            "last_price",
+            "from_open_pct",
+            "vs_prior_close_pct",
+            "return_5d_pct",
+            "return_20d_pct",
+            "daily_volume_ratio",
+            "intraday_volume_ratio",
+            "vwap_gap_pct",
+            "reason",
+        ]
+    ]
+    return upload_df
 
 
 def action_badge(action: str) -> str:
@@ -317,29 +363,126 @@ def send_email_report(subject: str, text_body: str, html_body: str, attachment_p
         smtp.send_message(msg)
 
 
+def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
+    if upload_df.empty:
+        log_status("SNOWFLAKE", "No rows to upload; skipping database write.")
+        return
+
+    account = os.getenv("SNOWFLAKE_ACCOUNT")
+    user = os.getenv("SNOWFLAKE_USER")
+    password = os.getenv("SNOWFLAKE_PASSWORD")
+    warehouse = os.getenv("SNOWFLAKE_WAREHOUSE")
+    database = os.getenv("SNOWFLAKE_DATABASE")
+    schema = os.getenv("SNOWFLAKE_SCHEMA")
+    table = os.getenv("SNOWFLAKE_TABLE", "STOCK_PICKS_DAILY")
+
+    if not all([account, user, password, warehouse, database, schema]):
+        log_status("SNOWFLAKE", "Secrets not fully configured; skipping database write.")
+        return
+
+    log_status("SNOWFLAKE", f"Connecting to Snowflake account {account}.")
+    connection = snowflake.connector.connect(
+        account=account,
+        user=user,
+        password=password,
+        warehouse=warehouse,
+        database=database,
+        schema=schema,
+    )
+
+    create_table_sql = f"""
+    create table if not exists {table} (
+      run_ts timestamp_ntz,
+      symbol string,
+      action string,
+      score number,
+      last_price float,
+      from_open_pct float,
+      vs_prior_close_pct float,
+      return_5d_pct float,
+      return_20d_pct float,
+      daily_volume_ratio float,
+      intraday_volume_ratio float,
+      vwap_gap_pct float,
+      reason string
+    )
+    """
+
+    insert_sql = f"""
+    insert into {table} (
+      run_ts,
+      symbol,
+      action,
+      score,
+      last_price,
+      from_open_pct,
+      vs_prior_close_pct,
+      return_5d_pct,
+      return_20d_pct,
+      daily_volume_ratio,
+      intraday_volume_ratio,
+      vwap_gap_pct,
+      reason
+    )
+    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    """
+
+    rows = [tuple(row) for row in upload_df.itertuples(index=False, name=None)]
+
+    try:
+        with connection.cursor() as cursor:
+            log_status("SNOWFLAKE", f"Ensuring table {table} exists.")
+            cursor.execute(create_table_sql)
+            log_status("SNOWFLAKE", f"Inserting {len(rows)} rows into {table}.")
+            cursor.executemany(insert_sql, rows)
+        log_status("SNOWFLAKE", f"Uploaded {len(rows)} rows to table {table}.")
+    finally:
+        connection.close()
+        log_status("SNOWFLAKE", "Connection closed.")
+
+
 def main() -> int:
+    log_status("START", "Daily stock picker run started.")
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     CHART_DIR.mkdir(parents=True, exist_ok=True)
+    log_status("SETUP", f"Output directory ready at {OUTPUT_DIR}.")
 
+    symbols = load_watchlist()
+    log_status("SETUP", f"Loaded {len(symbols)} symbols from watchlist.")
     results: list[PickResult] = []
-    for symbol in load_watchlist():
+    total_symbols = len(symbols)
+    for index, symbol in enumerate(symbols, start=1):
         try:
+            log_status("FETCH", f"[{index}/{total_symbols}] Loading market data for {symbol}.")
             daily_history = fetch_daily_history(symbol)
             intraday_history = fetch_intraday_history(symbol)
             result = score_symbol(symbol, daily_history, intraday_history)
             if result is not None:
                 results.append(result)
+                log_status(
+                    "SCORE",
+                    f"[{index}/{total_symbols}] {symbol} scored {result.score} as {result.action}.",
+                )
+            else:
+                log_status("SCORE", f"[{index}/{total_symbols}] {symbol} skipped due to insufficient data.")
         except Exception as exc:
-            print(f"Failed for {symbol}: {exc}")
+            log_status("ERROR", f"[{index}/{total_symbols}] Failed for {symbol}: {exc}")
 
+    log_status("RANK", f"Scored {len(results)} symbols successfully.")
     results.sort(key=lambda item: (item.score, item.intraday_change_pct, item.volume_ratio), reverse=True)
-    generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    generated_at_dt = datetime.now(timezone.utc)
+    generated_at = generated_at_dt.strftime("%Y-%m-%d %H:%M UTC")
+    generated_at_iso = generated_at_dt.strftime("%Y-%m-%d %H:%M:%S")
 
+    log_status("REPORT", "Building markdown report.")
     report = build_report(results, generated_at)
     report_path = OUTPUT_DIR / "latest_report.md"
     report_path.write_text(report)
+    log_status("REPORT", f"Saved markdown report to {report_path}.")
 
+    log_status("REPORT", "Building tabular outputs.")
     results_df = build_dataframe(results)
+    snowflake_df = prepare_snowflake_dataframe(results_df, generated_at_iso)
     json_path = OUTPUT_DIR / "latest_picks.json"
     json_path.write_text(results_df.to_json(orient="records", indent=2))
 
@@ -349,22 +492,33 @@ def main() -> int:
 
     csv_path = OUTPUT_DIR / "latest_picks.csv"
     results_df.to_csv(csv_path, index=False)
+    log_status("REPORT", f"Saved HTML, CSV, and JSON outputs to {OUTPUT_DIR}.")
 
     score_chart_path = CHART_DIR / "scores.png"
     momentum_chart_path = CHART_DIR / "momentum.png"
     if not results_df.empty:
+        log_status("CHARTS", "Generating score chart.")
         create_score_chart(results_df, score_chart_path)
+        log_status("CHARTS", "Generating momentum chart.")
         create_momentum_chart(results_df, momentum_chart_path)
+        log_status("CHARTS", f"Saved charts to {CHART_DIR}.")
+    else:
+        log_status("CHARTS", "No results available; skipping chart generation.")
 
+    log_status("DELIVERY", "Sending Telegram notification if configured.")
     telegram_text = build_telegram_text(results, generated_at)
     send_telegram_message(telegram_text)
+    log_status("DELIVERY", "Sending email report if configured.")
     send_email_report(
         subject=f"Intraday Stock Picks - {generated_at}",
         text_body=report,
         html_body=html_report,
         attachment_paths={"scores_chart": score_chart_path, "momentum_chart": momentum_chart_path},
     )
+    log_status("DELIVERY", "Writing results to Snowflake if configured.")
+    write_results_to_snowflake(snowflake_df)
 
+    log_status("DONE", "Run completed successfully.")
     print(report)
     print(f"\nSaved report to {report_path}")
     print(f"Saved HTML report to {html_path}")
