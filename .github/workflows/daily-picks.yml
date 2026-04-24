@@ -3,8 +3,10 @@ name: Daily Stock Picks
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions schedules use UTC. 08:00 UTC is 09:00 in the UK during BST.
-    - cron: "0 8 * * *"
+    # Weekdays only. 13:23 UTC = 09:23 ET (EST, UTC-5). During EDT (UTC-4) adjust to 13:23 for 09:23 ET.
+    # NYSE opens at 09:30 ET. Running at 09:23 gives a buffer before open.
+    # To match UK time: 13:23 UTC = 14:23 BST / 13:23 GMT.
+    - cron: "23 13 * * 1-5"
 
 jobs:
   run-daily-picks:
@@ -12,10 +14,10 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
@@ -39,7 +41,8 @@ jobs:
         run: python src/run_daily.py
 
       - name: Upload daily report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v4
         with:
           name: daily-stock-picks
           path: output/
+          retention-days: 30
