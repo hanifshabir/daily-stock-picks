@@ -566,6 +566,13 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
       return_20d_pct float, daily_volume_ratio float, intraday_volume_ratio float,
       vwap_gap_pct float, reason string
     )"""
+    # Migrate existing table if created with old schema
+    alter_sqls = [
+        f"alter table {table} add column if not exists entry float",
+        f"alter table {table} add column if not exists stop_loss float",
+        f"alter table {table} add column if not exists target float",
+        f"alter table {table} add column if not exists rsi float",
+    ]
     insert_sql = f"""
     insert into {table} (
       run_ts, symbol, action, score, last_price, entry, stop_loss, target, rsi,
@@ -576,6 +583,8 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
     try:
         with connection.cursor() as cur:
             cur.execute(create_sql)
+            for alter_sql in alter_sqls:
+                cur.execute(alter_sql)
             cur.executemany(insert_sql, rows)
         log_status("SNOWFLAKE", f"Uploaded {len(rows)} rows to {table}.")
     finally:
