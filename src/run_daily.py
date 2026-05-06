@@ -6,6 +6,7 @@ import smtplib
 from datetime import datetime, timezone
 from email.message import EmailMessage
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -13,13 +14,14 @@ import requests
 import snowflake.connector
 import yfinance as yf
 
-from strategy import PickResult, score_symbol
+from strategy import PickResult, SymbolHistory, score_symbol
 
 
 ROOT = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = ROOT / "output"
 CHART_DIR = OUTPUT_DIR / "charts"
 WATCHLIST_PATH = ROOT / "watchlist.json"
+MARKET_TZ = ZoneInfo("America/New_York")
 
 
 def log_status(stage: str, message: str) -> None:
@@ -38,7 +40,33 @@ def fetch_daily_history(symbol: str) -> pd.DataFrame:
 
 def fetch_intraday_history(symbol: str) -> pd.DataFrame:
     history = yf.Ticker(symbol).history(period="5d", interval="5m", auto_adjust=False, prepost=True)
-    return history if history is not None else pd.DataFrame()
+    if history is None or history.empty:
+        return pd.DataFrame()
+    return select_latest_regular_session(history)
+
+
+def select_latest_regular_session(history: pd.DataFrame) -> pd.DataFrame:
+    intraday = history.copy()
+    if intraday.empty:
+        return intraday
+
+    if not isinstance(intraday.index, pd.DatetimeIndex):
+        return intraday
+
+    if intraday.index.tz is None:
+        session_index = intraday.index
+    else:
+        session_index = intraday.index.tz_convert(MARKET_TZ)
+
+    latest_date = session_index.date.max()
+    latest_session = intraday.loc[session_index.date == latest_date].copy()
+    latest_session_index = session_index[session_index.date == latest_date]
+
+    regular_hours = latest_session.loc[
+        (latest_session_index.time >= datetime.strptime("09:30", "%H:%M").time())
+        & (latest_session_index.time <= datetime.strptime("16:00", "%H:%M").time())
+    ].copy()
+    return regular_hours if not regular_hours.empty else latest_session
 
 
 def build_dataframe(results: list[PickResult]) -> pd.DataFrame:
@@ -101,6 +129,79 @@ def prepare_snowflake_dataframe(results_df: pd.DataFrame, generated_at_iso: str)
         ]
     ]
     return upload_df
+
+
+def load_symbol_history(limit_runs: int = 3) -> dict[str, SymbolHistory]:
+    account = os.getenv("SNOWFLAKE_ACCOUNT")
+    user = os.getenv("SNOWFLAKE_USER")
+    password = os.getenv("SNOWFLAKE_PASSWORD")
+    warehouse = os.getenv("SNOWFLAKE_WAREHOUSE")
+    database = os.getenv("SNOWFLAKE_DATABASE")
+    schema = os.getenv("SNOWFLAKE_SCHEMA")
+    table = os.getenv("SNOWFLAKE_TABLE", "STOCK_PICKS_DAILY")
+
+    if not all([account, user, password, warehouse, database, schema]):
+        log_status("HISTORY", "Snowflake secrets not fully configured; skipping score history lookup.")
+        return {}
+
+    try:
+        connection = snowflake.connector.connect(
+            account=account,
+            user=user,
+            password=password,
+            warehouse=warehouse,
+            database=database,
+            schema=schema,
+        )
+        try:
+            query = f"select run_ts, symbol, action, score from {table} order by run_ts desc"
+            history_df = pd.read_sql(query, connection)
+        finally:
+            connection.close()
+    except Exception as exc:
+        log_status("HISTORY", f"Unable to load prior Snowflake rows: {exc}")
+        return {}
+
+    if history_df.empty:
+        log_status("HISTORY", "No prior Snowflake rows found; using standalone scoring.")
+        return {}
+
+    history_df["RUN_TS"] = pd.to_datetime(history_df["RUN_TS"])
+    history_df["run_date"] = history_df["RUN_TS"].dt.date
+    latest_daily = (
+        history_df.sort_values("RUN_TS")
+        .groupby(["run_date", "SYMBOL"], as_index=False)
+        .tail(1)
+        .sort_values(["SYMBOL", "RUN_TS"], ascending=[True, False])
+    )
+
+    history_by_symbol: dict[str, SymbolHistory] = {}
+    for symbol, symbol_df in latest_daily.groupby("SYMBOL"):
+        recent = symbol_df.head(limit_runs).copy()
+        if recent.empty:
+            continue
+
+        buy_rate = float((recent["ACTION"] == "Buy Watch").mean())
+        watch_rate = float(recent["ACTION"].isin(["Buy Watch", "Watch"]).mean())
+        score_std = recent["SCORE"].std()
+        history_by_symbol[symbol] = SymbolHistory(
+            prev_avg_score_3=float(recent["SCORE"].mean()),
+            prev_buy_rate_3=buy_rate,
+            prev_watch_rate_3=watch_rate,
+            prev_score_std_3=0.0 if pd.isna(score_std) else float(score_std),
+            sample_size=len(recent),
+        )
+
+    log_status("HISTORY", f"Loaded recent scoring history for {len(history_by_symbol)} symbols.")
+    return history_by_symbol
+
+
+def run_optional_step(stage: str, description: str, callback, *args, **kwargs) -> None:
+    log_status(stage, description)
+    try:
+        callback(*args, **kwargs)
+    except Exception as exc:
+        log_status(stage, f"{description} failed: {exc}")
 
 
 def action_badge(action: str) -> str:
@@ -449,6 +550,7 @@ def main() -> int:
 
     symbols = load_watchlist()
     log_status("SETUP", f"Loaded {len(symbols)} symbols from watchlist.")
+    symbol_history = load_symbol_history()
     results: list[PickResult] = []
     total_symbols = len(symbols)
     for index, symbol in enumerate(symbols, start=1):
@@ -456,7 +558,12 @@ def main() -> int:
             log_status("FETCH", f"[{index}/{total_symbols}] Loading market data for {symbol}.")
             daily_history = fetch_daily_history(symbol)
             intraday_history = fetch_intraday_history(symbol)
-            result = score_symbol(symbol, daily_history, intraday_history)
+            result = score_symbol(
+                symbol,
+                daily_history,
+                intraday_history,
+                history=symbol_history.get(symbol),
+            )
             if result is not None:
                 results.append(result)
                 log_status(
@@ -505,18 +612,23 @@ def main() -> int:
     else:
         log_status("CHARTS", "No results available; skipping chart generation.")
 
-    log_status("DELIVERY", "Sending Telegram notification if configured.")
     telegram_text = build_telegram_text(results, generated_at)
-    send_telegram_message(telegram_text)
-    log_status("DELIVERY", "Sending email report if configured.")
-    send_email_report(
+    run_optional_step("DELIVERY", "Sending Telegram notification if configured.", send_telegram_message, telegram_text)
+    run_optional_step(
+        "DELIVERY",
+        "Sending email report if configured.",
+        send_email_report,
         subject=f"Intraday Stock Picks - {generated_at}",
         text_body=report,
         html_body=html_report,
         attachment_paths={"scores_chart": score_chart_path, "momentum_chart": momentum_chart_path},
     )
-    log_status("DELIVERY", "Writing results to Snowflake if configured.")
-    write_results_to_snowflake(snowflake_df)
+    run_optional_step(
+        "DELIVERY",
+        "Writing results to Snowflake if configured.",
+        write_results_to_snowflake,
+        snowflake_df,
+    )
 
     log_status("DONE", "Run completed successfully.")
     print(report)

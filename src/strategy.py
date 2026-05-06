@@ -3,6 +3,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
+@dataclass(frozen=True)
+class SymbolHistory:
+    prev_avg_score_3: float = 0.0
+    prev_buy_rate_3: float = 0.0
+    prev_watch_rate_3: float = 0.0
+    prev_score_std_3: float = 0.0
+    sample_size: int = 0
+
+
 @dataclass
 class PickResult:
     symbol: str
@@ -32,14 +41,19 @@ def _safe_float(value, default: float = 0.0) -> float:
 
 
 def classify_action(score: int) -> str:
-    if score >= 75:
+    if score >= 80:
         return "Buy Watch"
-    if score >= 55:
+    if score >= 58:
         return "Watch"
     return "Skip"
 
 
-def score_symbol(symbol: str, daily_df, intraday_df) -> PickResult | None:
+def score_symbol(
+    symbol: str,
+    daily_df,
+    intraday_df,
+    history: SymbolHistory | None = None,
+) -> PickResult | None:
     if daily_df is None or daily_df.empty or len(daily_df) < 60:
         return None
 
@@ -101,63 +115,127 @@ def score_symbol(symbol: str, daily_df, intraday_df) -> PickResult | None:
 
     score = 0
     reasons: list[str] = []
+    history = history or SymbolHistory()
 
     if last_price > sma20:
-        score += 15
+        score += 12
         reasons.append("above 20-day average")
     else:
-        score -= 5
+        score -= 8
 
     if last_price > sma50:
-        score += 15
+        score += 12
         reasons.append("above 50-day average")
     else:
-        score -= 5
+        score -= 8
 
-    if return_5d > 0.01:
-        score += 10
+    if return_5d >= 0.035:
+        score += 14
+        reasons.append("strong 5-day momentum")
+    elif return_5d >= 0.015:
+        score += 8
         reasons.append("positive 5-day momentum")
     elif return_5d < -0.03:
-        score -= 8
+        score -= 12
+    elif return_5d < 0:
+        score -= 6
 
-    if return_20d > 0.03:
-        score += 10
+    if return_20d >= 0.20:
+        score += 14
+        reasons.append("strong 20-day trend")
+    elif return_20d >= 0.10:
+        score += 8
         reasons.append("positive 20-day momentum")
     elif return_20d < -0.08:
-        score -= 10
+        score -= 12
+    elif return_20d < 0:
+        score -= 6
 
-    if volume_ratio > 1.1:
-        score += 10
+    if volume_ratio >= 1.2:
+        score += 7
         reasons.append("daily volume above average")
-    elif volume_ratio < 0.8:
-        score -= 5
+    elif volume_ratio >= 1.0:
+        score += 4
+    elif volume_ratio < 0.75:
+        score -= 4
 
-    if intraday_change_pct > 0.003:
-        score += 15
+    if intraday_change_pct >= 0.02:
+        score += 16
         reasons.append("strong move from today's open")
-    elif intraday_change_pct < -0.004:
+    elif intraday_change_pct >= 0.005:
+        score += 10
+        reasons.append("positive move from today's open")
+    elif intraday_change_pct <= -0.02:
+        score -= 16
+    elif intraday_change_pct < -0.005:
         score -= 10
 
-    if day_change_pct > 0.005:
+    if day_change_pct >= 0.015:
         score += 10
         reasons.append("green versus prior close")
-    elif day_change_pct < -0.008:
-        score -= 8
+    elif day_change_pct >= 0.005:
+        score += 6
+        reasons.append("up versus prior close")
+    elif day_change_pct <= -0.015:
+        score -= 10
+    elif day_change_pct < -0.005:
+        score -= 6
 
-    if intraday_volume_ratio > 1.2:
-        score += 10
-        reasons.append("intraday volume spike")
-    elif intraday_volume_ratio < 0.7 and intraday_volume_ratio > 0:
-        score -= 5
+    if intraday_volume_ratio > 0:
+        if intraday_volume_ratio >= 1.8:
+            score += 6
+            reasons.append("intraday volume spike")
+        elif intraday_volume_ratio >= 1.3:
+            score += 3
+            reasons.append("intraday volume support")
+        elif intraday_volume_ratio < 0.7:
+            score -= 2
 
-    if vwap_distance_pct > 0.002:
-        score += 10
+    if vwap_distance_pct >= 0.02:
+        score += 12
+        reasons.append("well above VWAP")
+    elif vwap_distance_pct >= 0.007:
+        score += 8
         reasons.append("trading above VWAP")
-    elif vwap_distance_pct < -0.003:
+    elif vwap_distance_pct <= -0.02:
+        score -= 12
+    elif vwap_distance_pct < -0.005:
         score -= 8
+
+    if history.sample_size >= 2:
+        if history.prev_buy_rate_3 >= 0.67:
+            score += 12
+            reasons.append("consistent recent Buy Watch history")
+        elif history.prev_buy_rate_3 >= 0.34:
+            score += 6
+            reasons.append("recent Buy Watch history")
+
+        if history.prev_watch_rate_3 >= 0.67:
+            score += 6
+            reasons.append("recent watchlist persistence")
+
+        if history.prev_avg_score_3 >= 75:
+            score += 10
+            reasons.append("high recent average score")
+        elif history.prev_avg_score_3 >= 60:
+            score += 5
+        elif history.prev_avg_score_3 < 25:
+            score -= 6
+
+        if history.prev_score_std_3 >= 25:
+            score -= 8
+        elif history.prev_score_std_3 >= 15:
+            score -= 4
 
     if last_price < sma20 < sma50:
         score -= 12
+
+    if intraday_change_pct > 0 and vwap_distance_pct < 0:
+        score -= 6
+    if day_change_pct > 0 and return_5d < 0:
+        score -= 4
+    if return_20d > 0.20 and return_5d < 0:
+        score -= 4
 
     reason = ", ".join(reasons) if reasons else "no strong intraday signal"
 
