@@ -88,16 +88,23 @@ def score_symbol(
     intraday_volume_ratio = 0.0
     vwap_distance_pct = 0.0
 
-    if intraday is not None and len(intraday) >= 12:
-        intraday["turnover"] = intraday["Close"] * intraday["Volume"]
-        cumulative_volume = intraday["Volume"].cumsum()
-        cumulative_turnover = intraday["turnover"].cumsum()
-        intraday["vwap"] = cumulative_turnover / cumulative_volume.replace(0, None)
-        intraday["avg_volume12"] = intraday["Volume"].rolling(12).mean()
+    if intraday is not None:
+        intraday = intraday.loc[intraday["Close"].notna()].copy()
+        intraday["Volume"] = intraday["Volume"].fillna(0)
+        traded_intraday = intraday.loc[intraday["Volume"] > 0].copy()
+    else:
+        traded_intraday = None
 
-        intraday_row = intraday.iloc[-1]
+    if traded_intraday is not None and len(traded_intraday) >= 12:
+        traded_intraday["turnover"] = traded_intraday["Close"] * traded_intraday["Volume"]
+        cumulative_volume = traded_intraday["Volume"].cumsum()
+        cumulative_turnover = traded_intraday["turnover"].cumsum()
+        traded_intraday["vwap"] = cumulative_turnover / cumulative_volume
+        traded_intraday["avg_volume12"] = traded_intraday["Volume"].rolling(12).mean()
+
+        intraday_row = traded_intraday.iloc[-1]
         last_price = _safe_float(intraday_row["Close"], close)
-        open_price = _safe_float(intraday.iloc[0]["Open"], close)
+        open_price = _safe_float(traded_intraday.iloc[0]["Open"], close)
         previous_close = _safe_float(daily.iloc[-2]["Close"], close) if len(daily) > 1 else close
         day_change_pct = (
             (last_price - previous_close) / previous_close if previous_close else 0.0
@@ -111,6 +118,16 @@ def score_symbol(
         intraday_vwap = _safe_float(intraday_row["vwap"], last_price)
         vwap_distance_pct = (
             (last_price - intraday_vwap) / intraday_vwap if intraday_vwap else 0.0
+        )
+    elif intraday is not None and not intraday.empty:
+        last_price = _safe_float(intraday.iloc[-1]["Close"], close)
+        open_price = _safe_float(intraday.iloc[0]["Open"], close)
+        previous_close = _safe_float(daily.iloc[-2]["Close"], close) if len(daily) > 1 else close
+        day_change_pct = (
+            (last_price - previous_close) / previous_close if previous_close else 0.0
+        )
+        intraday_change_pct = (
+            (last_price - open_price) / open_price if open_price else 0.0
         )
 
     score = 0

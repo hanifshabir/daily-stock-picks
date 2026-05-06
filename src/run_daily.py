@@ -58,15 +58,25 @@ def select_latest_regular_session(history: pd.DataFrame) -> pd.DataFrame:
     else:
         session_index = intraday.index.tz_convert(MARKET_TZ)
 
+    regular_mask = (
+        (session_index.time >= datetime.strptime("09:30", "%H:%M").time())
+        & (session_index.time <= datetime.strptime("16:00", "%H:%M").time())
+    )
+    regular_hours = intraday.loc[regular_mask].copy()
+    regular_index = session_index[regular_mask]
+
+    if not regular_hours.empty:
+        regular_hours["session_date"] = regular_index.date
+        regular_with_volume = regular_hours.loc[regular_hours["Volume"].fillna(0) > 0].copy()
+        source = regular_with_volume if not regular_with_volume.empty else regular_hours
+        latest_date = source["session_date"].max()
+        selected = source.loc[source["session_date"] == latest_date].drop(columns=["session_date"])
+        if not selected.empty:
+            return selected
+
     latest_date = session_index.date.max()
     latest_session = intraday.loc[session_index.date == latest_date].copy()
-    latest_session_index = session_index[session_index.date == latest_date]
-
-    regular_hours = latest_session.loc[
-        (latest_session_index.time >= datetime.strptime("09:30", "%H:%M").time())
-        & (latest_session_index.time <= datetime.strptime("16:00", "%H:%M").time())
-    ].copy()
-    return regular_hours if not regular_hours.empty else latest_session
+    return latest_session.loc[latest_session["Volume"].fillna(0) > 0].copy()
 
 
 def build_dataframe(results: list[PickResult]) -> pd.DataFrame:
