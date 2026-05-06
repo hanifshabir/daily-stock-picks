@@ -88,6 +88,7 @@ def build_dataframe(results: list[PickResult]) -> pd.DataFrame:
             "Last Price": round(pick.last_price, 2),
             "Entry": round(pick.entry_price, 2),
             "Stop Loss": round(pick.stop_loss, 2),
+            "Daily Target": round(pick.daily_target_price, 2),
             "1W Target": round(pick.target_price, 2),
             "From Open %": round(pick.intraday_change_pct * 100, 2),
             "Vs Prior Close %": round(pick.day_change_pct * 100, 2),
@@ -116,6 +117,7 @@ def prepare_snowflake_dataframe(results_df: pd.DataFrame, generated_at_iso: str)
         "last_price",
         "entry",
         "stop_loss",
+        "daily_target",
         "target",
         "from_open_pct",
         "vs_prior_close_pct",
@@ -136,6 +138,7 @@ def prepare_snowflake_dataframe(results_df: pd.DataFrame, generated_at_iso: str)
             "last_price",
             "entry",
             "stop_loss",
+            "daily_target",
             "target",
             "from_open_pct",
             "vs_prior_close_pct",
@@ -267,6 +270,7 @@ def build_report(results: list[PickResult], generated_at: str) -> str:
                 f"- Last price: ${pick.last_price:.2f}",
                 f"- Suggested entry: {_fmt_money(pick.entry_price)}",
                 f"- Suggested stop loss: {_fmt_money(pick.stop_loss)}",
+                f"- Daily target: {_fmt_money(pick.daily_target_price)}",
                 f"- 1-week target: {_fmt_money(pick.target_price)}",
                 f"- From open: {_fmt_pct(pick.intraday_change_pct)}",
                 f"- Vs prior close: {_fmt_pct(pick.day_change_pct)}",
@@ -286,6 +290,7 @@ def build_report(results: list[PickResult], generated_at: str) -> str:
         lines.append(
             f"- {pick.symbol}: {pick.action}, score {pick.score}, "
             f"entry {_fmt_money(pick.entry_price)}, "
+            f"daily target {_fmt_money(pick.daily_target_price)}, "
             f"target {_fmt_money(pick.target_price)}, "
             f"from open {_fmt_pct(pick.intraday_change_pct)}, "
             f"intraday volume {pick.intraday_volume_ratio:.2f}x"
@@ -303,6 +308,7 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
 
     summary_cards = []
     for pick in results[:3]:
+        daily_reward_pct = ((pick.daily_target_price - pick.entry_price) / pick.entry_price) if pick.entry_price else 0.0
         reward_pct = ((pick.target_price - pick.entry_price) / pick.entry_price) if pick.entry_price else 0.0
         risk_pct = ((pick.entry_price - pick.stop_loss) / pick.entry_price) if pick.entry_price else 0.0
         breakdown_items = "".join(
@@ -325,6 +331,10 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
                   <div style="font-size:22px;font-weight:800;margin-top:4px;">{_fmt_money(pick.entry_price)}</div>
                 </div>
                 <div style="background:rgba(255,255,255,0.08);border-radius:14px;padding:12px;">
+                  <div style="font-size:11px;opacity:0.7;text-transform:uppercase;">Daily Target</div>
+                  <div style="font-size:22px;font-weight:800;margin-top:4px;">{_fmt_money(pick.daily_target_price)}</div>
+                </div>
+                <div style="background:rgba(255,255,255,0.08);border-radius:14px;padding:12px;">
                   <div style="font-size:11px;opacity:0.7;text-transform:uppercase;">1W Target</div>
                   <div style="font-size:22px;font-weight:800;margin-top:4px;">{_fmt_money(pick.target_price)}</div>
                 </div>
@@ -333,8 +343,8 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
                   <div style="font-size:22px;font-weight:800;margin-top:4px;">{_fmt_money(pick.stop_loss)}</div>
                 </div>
                 <div style="background:rgba(255,255,255,0.08);border-radius:14px;padding:12px;">
-                  <div style="font-size:11px;opacity:0.7;text-transform:uppercase;">Reward / Risk</div>
-                  <div style="font-size:18px;font-weight:800;margin-top:6px;">{reward_pct * 100:.1f}% / {risk_pct * 100:.1f}%</div>
+                  <div style="font-size:11px;opacity:0.7;text-transform:uppercase;">Daily / Weekly / Risk</div>
+                  <div style="font-size:18px;font-weight:800;margin-top:6px;">{daily_reward_pct * 100:.1f}% / {reward_pct * 100:.1f}% / {risk_pct * 100:.1f}%</div>
                 </div>
               </div>
               <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:14px;font-size:13px;">
@@ -363,7 +373,7 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
                   <div style="font-size:18px;font-weight:800;color:#0f172a;">{pick.symbol}</div>
                   <div>{action_badge(pick.action)}</div>
                 </div>
-                <div style="margin-top:6px;font-size:13px;color:#475569;">Entry {_fmt_money(pick.entry_price)} · Target {_fmt_money(pick.target_price)} · Stop {_fmt_money(pick.stop_loss)}</div>
+                <div style="margin-top:6px;font-size:13px;color:#475569;">Entry {_fmt_money(pick.entry_price)} · Day {_fmt_money(pick.daily_target_price)} · 1W {_fmt_money(pick.target_price)} · Stop {_fmt_money(pick.stop_loss)}</div>
               </div>
               <div style="text-align:right;font-size:13px;color:#475569;">
                 <div style="color:{'#166534' if pick.intraday_change_pct >= 0 else '#b91c1c'};">Open {_fmt_pct(pick.intraday_change_pct)}</div>
@@ -549,6 +559,7 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
       last_price float,
       entry float,
       stop_loss float,
+      daily_target float,
       target float,
       from_open_pct float,
       vs_prior_close_pct float,
@@ -570,6 +581,7 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
       last_price,
       entry,
       stop_loss,
+      daily_target,
       target,
       from_open_pct,
       vs_prior_close_pct,
@@ -580,7 +592,7 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
       vwap_gap_pct,
       reason
     )
-    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     rows = [tuple(row) for row in upload_df.itertuples(index=False, name=None)]
@@ -589,6 +601,7 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
         with connection.cursor() as cursor:
             log_status("SNOWFLAKE", f"Ensuring table {table} exists.")
             cursor.execute(create_table_sql)
+            cursor.execute(f"alter table {table} add column if not exists daily_target float")
             log_status("SNOWFLAKE", f"Inserting {len(rows)} rows into {table}.")
             cursor.executemany(insert_sql, rows)
         log_status("SNOWFLAKE", f"Uploaded {len(rows)} rows to table {table}.")

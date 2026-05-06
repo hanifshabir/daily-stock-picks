@@ -32,6 +32,7 @@ class PickResult:
     vwap_distance_pct: float
     entry_price: float
     stop_loss: float
+    daily_target_price: float
     target_price: float
     reason: str
     score_breakdown: list[str]
@@ -329,14 +330,17 @@ def score_symbol(
         if action == "Buy Watch":
             entry_price = _clamp_price(max(entry_anchor, last_price - 0.20 * atr14))
             stop_loss = _clamp_price(entry_price - 1.00 * atr14)
+            daily_target_price = _clamp_price(entry_price + 0.60 * atr14)
             target_price = _clamp_price(entry_price + 1.50 * atr14)
         elif action == "Watch":
             entry_price = _clamp_price(max(entry_anchor, last_price - 0.35 * atr14))
             stop_loss = _clamp_price(entry_price - 0.90 * atr14)
+            daily_target_price = _clamp_price(entry_price + 0.45 * atr14)
             target_price = _clamp_price(entry_price + 1.20 * atr14)
         else:
             entry_price = _clamp_price(last_price)
             stop_loss = _clamp_price(last_price - 0.80 * atr14)
+            daily_target_price = _clamp_price(last_price + 0.35 * atr14)
             target_price = _clamp_price(last_price + 0.80 * atr14)
 
     reason = ", ".join(reasons) if reasons else "no strong intraday signal"
@@ -358,6 +362,7 @@ def score_symbol(
         vwap_distance_pct=vwap_distance_pct,
         entry_price=entry_price,
         stop_loss=stop_loss,
+        daily_target_price=daily_target_price,
         target_price=target_price,
         reason=reason,
         score_breakdown=score_breakdown,
