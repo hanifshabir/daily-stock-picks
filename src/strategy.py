@@ -34,6 +34,7 @@ class PickResult:
     stop_loss: float
     target_price: float
     reason: str
+    score_breakdown: list[str]
 
 
 def _safe_float(value, default: float = 0.0) -> float:
@@ -155,127 +156,170 @@ def score_symbol(
 
     score = 0
     reasons: list[str] = []
+    score_breakdown: list[str] = []
     history = history or SymbolHistory()
 
     if last_price > sma20:
         score += 12
         reasons.append("above 20-day average")
+        score_breakdown.append("+12 above 20-day average")
     else:
         score -= 8
+        score_breakdown.append("-8 below 20-day average")
 
     if last_price > sma50:
         score += 12
         reasons.append("above 50-day average")
+        score_breakdown.append("+12 above 50-day average")
     else:
         score -= 8
+        score_breakdown.append("-8 below 50-day average")
 
     if return_5d >= 0.035:
         score += 14
         reasons.append("strong 5-day momentum")
+        score_breakdown.append("+14 strong 5-day momentum")
     elif return_5d >= 0.015:
         score += 8
         reasons.append("positive 5-day momentum")
+        score_breakdown.append("+8 positive 5-day momentum")
     elif return_5d < -0.03:
         score -= 12
+        score_breakdown.append("-12 weak 5-day momentum")
     elif return_5d < 0:
         score -= 6
+        score_breakdown.append("-6 negative 5-day momentum")
 
     if return_20d >= 0.20:
         score += 14
         reasons.append("strong 20-day trend")
+        score_breakdown.append("+14 strong 20-day trend")
     elif return_20d >= 0.10:
         score += 8
         reasons.append("positive 20-day momentum")
+        score_breakdown.append("+8 positive 20-day momentum")
     elif return_20d < -0.08:
         score -= 12
+        score_breakdown.append("-12 weak 20-day trend")
     elif return_20d < 0:
         score -= 6
+        score_breakdown.append("-6 negative 20-day momentum")
 
     if volume_ratio >= 1.2:
         score += 7
         reasons.append("daily volume above average")
+        score_breakdown.append("+7 daily volume above average")
     elif volume_ratio >= 1.0:
         score += 4
+        score_breakdown.append("+4 healthy daily volume")
     elif volume_ratio < 0.75:
         score -= 4
+        score_breakdown.append("-4 weak daily volume")
 
     if intraday_change_pct >= 0.02:
         score += 16
         reasons.append("strong move from today's open")
+        score_breakdown.append("+16 strong move from today's open")
     elif intraday_change_pct >= 0.005:
         score += 10
         reasons.append("positive move from today's open")
+        score_breakdown.append("+10 positive move from today's open")
     elif intraday_change_pct <= -0.02:
         score -= 16
+        score_breakdown.append("-16 sharp fade from today's open")
     elif intraday_change_pct < -0.005:
         score -= 10
+        score_breakdown.append("-10 weak move from today's open")
 
     if day_change_pct >= 0.015:
         score += 10
         reasons.append("green versus prior close")
+        score_breakdown.append("+10 strong move versus prior close")
     elif day_change_pct >= 0.005:
         score += 6
         reasons.append("up versus prior close")
+        score_breakdown.append("+6 up versus prior close")
     elif day_change_pct <= -0.015:
         score -= 10
+        score_breakdown.append("-10 weak versus prior close")
     elif day_change_pct < -0.005:
         score -= 6
+        score_breakdown.append("-6 down versus prior close")
 
     if intraday_volume_ratio > 0:
         if intraday_volume_ratio >= 1.8:
             score += 6
             reasons.append("intraday volume spike")
+            score_breakdown.append("+6 intraday volume spike")
         elif intraday_volume_ratio >= 1.3:
             score += 3
             reasons.append("intraday volume support")
+            score_breakdown.append("+3 intraday volume support")
         elif intraday_volume_ratio < 0.7:
             score -= 2
+            score_breakdown.append("-2 thin intraday volume")
 
     if vwap_distance_pct >= 0.02:
         score += 12
         reasons.append("well above VWAP")
+        score_breakdown.append("+12 well above VWAP")
     elif vwap_distance_pct >= 0.007:
         score += 8
         reasons.append("trading above VWAP")
+        score_breakdown.append("+8 trading above VWAP")
     elif vwap_distance_pct <= -0.02:
         score -= 12
+        score_breakdown.append("-12 well below VWAP")
     elif vwap_distance_pct < -0.005:
         score -= 8
+        score_breakdown.append("-8 trading below VWAP")
 
     if history.sample_size >= 2:
         if history.prev_buy_rate_3 >= 0.67:
             score += 12
             reasons.append("consistent recent Buy Watch history")
+            score_breakdown.append("+12 consistent recent Buy Watch history")
         elif history.prev_buy_rate_3 >= 0.34:
             score += 6
             reasons.append("recent Buy Watch history")
+            score_breakdown.append("+6 recent Buy Watch history")
 
         if history.prev_watch_rate_3 >= 0.67:
             score += 6
             reasons.append("recent watchlist persistence")
+            score_breakdown.append("+6 recent watchlist persistence")
 
         if history.prev_avg_score_3 >= 75:
             score += 10
             reasons.append("high recent average score")
+            score_breakdown.append("+10 high recent average score")
         elif history.prev_avg_score_3 >= 60:
             score += 5
+            score_breakdown.append("+5 solid recent average score")
         elif history.prev_avg_score_3 < 25:
             score -= 6
+            score_breakdown.append("-6 weak recent average score")
 
         if history.prev_score_std_3 >= 25:
             score -= 8
+            score_breakdown.append("-8 unstable recent score history")
         elif history.prev_score_std_3 >= 15:
             score -= 4
+            score_breakdown.append("-4 somewhat unstable recent score history")
 
     if last_price < sma20 < sma50:
         score -= 12
+        score_breakdown.append("-12 bearish moving-average stack")
 
     if intraday_change_pct > 0 and vwap_distance_pct < 0:
         score -= 6
+        score_breakdown.append("-6 positive price move but below VWAP")
     if day_change_pct > 0 and return_5d < 0:
         score -= 4
+        score_breakdown.append("-4 bounce without 5-day support")
     if return_20d > 0.20 and return_5d < 0:
         score -= 4
+        score_breakdown.append("-4 long trend strong but short-term fade")
 
     entry_anchor = last_price
     if vwap_distance_pct > 0 and traded_intraday is not None and not traded_intraday.empty:
@@ -316,4 +360,5 @@ def score_symbol(
         stop_loss=stop_loss,
         target_price=target_price,
         reason=reason,
+        score_breakdown=score_breakdown,
     )

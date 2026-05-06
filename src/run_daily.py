@@ -305,6 +305,9 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
     for pick in results[:3]:
         reward_pct = ((pick.target_price - pick.entry_price) / pick.entry_price) if pick.entry_price else 0.0
         risk_pct = ((pick.entry_price - pick.stop_loss) / pick.entry_price) if pick.entry_price else 0.0
+        breakdown_items = "".join(
+            f'<li style="margin:0 0 4px 18px;">{item}</li>' for item in pick.score_breakdown[:8]
+        )
         summary_cards.append(
             f"""
             <div style="flex:1;min-width:250px;background:linear-gradient(180deg,#0f172a,#172554);color:#f8fafc;border-radius:22px;padding:18px;box-shadow:0 16px 40px rgba(15,23,42,0.18);">
@@ -338,6 +341,12 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
                 <div>From open {_fmt_pct(pick.intraday_change_pct)}</div>
                 <div>VWAP {_fmt_pct(pick.vwap_distance_pct)}</div>
                 <div>Vol {pick.intraday_volume_ratio:.2f}x</div>
+              </div>
+              <div style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.12);">
+                <div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.75;">Why It Scored Here</div>
+                <ul style="margin:8px 0 0;padding:0;font-size:13px;line-height:1.45;color:#dbeafe;">
+                  {breakdown_items}
+                </ul>
               </div>
             </div>
             """
