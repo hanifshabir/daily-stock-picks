@@ -86,6 +86,9 @@ def build_dataframe(results: list[PickResult]) -> pd.DataFrame:
             "Action": pick.action,
             "Score": pick.score,
             "Last Price": round(pick.last_price, 2),
+            "Entry": round(pick.entry_price, 2),
+            "Stop Loss": round(pick.stop_loss, 2),
+            "1W Target": round(pick.target_price, 2),
             "From Open %": round(pick.intraday_change_pct * 100, 2),
             "Vs Prior Close %": round(pick.day_change_pct * 100, 2),
             "5D %": round(pick.return_5d * 100, 2),
@@ -111,6 +114,9 @@ def prepare_snowflake_dataframe(results_df: pd.DataFrame, generated_at_iso: str)
         "action",
         "score",
         "last_price",
+        "entry",
+        "stop_loss",
+        "target",
         "from_open_pct",
         "vs_prior_close_pct",
         "return_5d_pct",
@@ -128,6 +134,9 @@ def prepare_snowflake_dataframe(results_df: pd.DataFrame, generated_at_iso: str)
             "action",
             "score",
             "last_price",
+            "entry",
+            "stop_loss",
+            "target",
             "from_open_pct",
             "vs_prior_close_pct",
             "return_5d_pct",
@@ -231,6 +240,10 @@ def _fmt_pct(value: float) -> str:
     return f"{value * 100:+.2f}%"
 
 
+def _fmt_money(value: float) -> str:
+    return f"${value:.2f}"
+
+
 def build_report(results: list[PickResult], generated_at: str) -> str:
     lines = [
         "# Intraday Stock Picks",
@@ -252,6 +265,9 @@ def build_report(results: list[PickResult], generated_at: str) -> str:
                 f"## {idx}. {pick.symbol} ({pick.action})",
                 f"- Score: {pick.score}",
                 f"- Last price: ${pick.last_price:.2f}",
+                f"- Suggested entry: {_fmt_money(pick.entry_price)}",
+                f"- Suggested stop loss: {_fmt_money(pick.stop_loss)}",
+                f"- 1-week target: {_fmt_money(pick.target_price)}",
                 f"- From open: {_fmt_pct(pick.intraday_change_pct)}",
                 f"- Vs prior close: {_fmt_pct(pick.day_change_pct)}",
                 f"- 5-day momentum: {_fmt_pct(pick.return_5d)}",
@@ -269,8 +285,9 @@ def build_report(results: list[PickResult], generated_at: str) -> str:
     for pick in results:
         lines.append(
             f"- {pick.symbol}: {pick.action}, score {pick.score}, "
+            f"entry {_fmt_money(pick.entry_price)}, "
+            f"target {_fmt_money(pick.target_price)}, "
             f"from open {_fmt_pct(pick.intraday_change_pct)}, "
-            f"vs prior close {_fmt_pct(pick.day_change_pct)}, "
             f"intraday volume {pick.intraday_volume_ratio:.2f}x"
         )
 
@@ -286,35 +303,64 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
 
     summary_cards = []
     for pick in results[:3]:
+        reward_pct = ((pick.target_price - pick.entry_price) / pick.entry_price) if pick.entry_price else 0.0
+        risk_pct = ((pick.entry_price - pick.stop_loss) / pick.entry_price) if pick.entry_price else 0.0
         summary_cards.append(
             f"""
-            <div style="flex:1;min-width:180px;background:#0f172a;color:#f8fafc;border-radius:16px;padding:16px;">
-              <div style="font-size:13px;opacity:0.8;">Top setup</div>
-              <div style="font-size:26px;font-weight:800;margin-top:6px;">{pick.symbol}</div>
-              <div style="margin-top:8px;">{action_badge(pick.action)}</div>
-              <div style="font-size:30px;font-weight:800;margin-top:10px;">{pick.score}</div>
-              <div style="margin-top:8px;font-size:13px;">From open {_fmt_pct(pick.intraday_change_pct)}</div>
-              <div style="font-size:13px;">VWAP gap {_fmt_pct(pick.vwap_distance_pct)}</div>
+            <div style="flex:1;min-width:250px;background:linear-gradient(180deg,#0f172a,#172554);color:#f8fafc;border-radius:22px;padding:18px;box-shadow:0 16px 40px rgba(15,23,42,0.18);">
+              <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+                <div>
+                  <div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.75;">Weekly setup</div>
+                  <div style="font-size:28px;font-weight:800;margin-top:4px;">{pick.symbol}</div>
+                </div>
+                <div style="font-size:34px;font-weight:900;">{pick.score}</div>
+              </div>
+              <div style="margin-top:10px;">{action_badge(pick.action)}</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;">
+                <div style="background:rgba(255,255,255,0.08);border-radius:14px;padding:12px;">
+                  <div style="font-size:11px;opacity:0.7;text-transform:uppercase;">Entry</div>
+                  <div style="font-size:22px;font-weight:800;margin-top:4px;">{_fmt_money(pick.entry_price)}</div>
+                </div>
+                <div style="background:rgba(255,255,255,0.08);border-radius:14px;padding:12px;">
+                  <div style="font-size:11px;opacity:0.7;text-transform:uppercase;">1W Target</div>
+                  <div style="font-size:22px;font-weight:800;margin-top:4px;">{_fmt_money(pick.target_price)}</div>
+                </div>
+                <div style="background:rgba(255,255,255,0.08);border-radius:14px;padding:12px;">
+                  <div style="font-size:11px;opacity:0.7;text-transform:uppercase;">Stop</div>
+                  <div style="font-size:22px;font-weight:800;margin-top:4px;">{_fmt_money(pick.stop_loss)}</div>
+                </div>
+                <div style="background:rgba(255,255,255,0.08);border-radius:14px;padding:12px;">
+                  <div style="font-size:11px;opacity:0.7;text-transform:uppercase;">Reward / Risk</div>
+                  <div style="font-size:18px;font-weight:800;margin-top:6px;">{reward_pct * 100:.1f}% / {risk_pct * 100:.1f}%</div>
+                </div>
+              </div>
+              <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:14px;font-size:13px;">
+                <div>From open {_fmt_pct(pick.intraday_change_pct)}</div>
+                <div>VWAP {_fmt_pct(pick.vwap_distance_pct)}</div>
+                <div>Vol {pick.intraday_volume_ratio:.2f}x</div>
+              </div>
             </div>
             """
         )
 
-    rows = []
-    for pick in results:
-        row_bg = "#ffffff" if pick.action != "Skip" else "#f8fafc"
-        rows.append(
+    scoreboard_cards = []
+    for pick in results[:10]:
+        scoreboard_cards.append(
             f"""
-            <tr style="background:{row_bg};">
-              <td style="padding:12px;border-bottom:1px solid #e5e7eb;font-weight:700;">{pick.symbol}</td>
-              <td style="padding:12px;border-bottom:1px solid #e5e7eb;">{action_badge(pick.action)}</td>
-              <td style="padding:12px;border-bottom:1px solid #e5e7eb;font-weight:700;">{pick.score}</td>
-              <td style="padding:12px;border-bottom:1px solid #e5e7eb;">${pick.last_price:.2f}</td>
-              <td style="padding:12px;border-bottom:1px solid #e5e7eb;color:{'#166534' if pick.intraday_change_pct >= 0 else '#b91c1c'};">{_fmt_pct(pick.intraday_change_pct)}</td>
-              <td style="padding:12px;border-bottom:1px solid #e5e7eb;color:{'#166534' if pick.day_change_pct >= 0 else '#b91c1c'};">{_fmt_pct(pick.day_change_pct)}</td>
-              <td style="padding:12px;border-bottom:1px solid #e5e7eb;">{pick.intraday_volume_ratio:.2f}x</td>
-              <td style="padding:12px;border-bottom:1px solid #e5e7eb;">{_fmt_pct(pick.vwap_distance_pct)}</td>
-              <td style="padding:12px;border-bottom:1px solid #e5e7eb;max-width:420px;">{pick.reason}</td>
-            </tr>
+            <div style="display:grid;grid-template-columns:72px 1fr auto;gap:12px;align-items:center;padding:14px 0;border-bottom:1px solid #e2e8f0;">
+              <div style="font-size:30px;font-weight:900;color:#0f172a;">{pick.score}</div>
+              <div>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                  <div style="font-size:18px;font-weight:800;color:#0f172a;">{pick.symbol}</div>
+                  <div>{action_badge(pick.action)}</div>
+                </div>
+                <div style="margin-top:6px;font-size:13px;color:#475569;">Entry {_fmt_money(pick.entry_price)} · Target {_fmt_money(pick.target_price)} · Stop {_fmt_money(pick.stop_loss)}</div>
+              </div>
+              <div style="text-align:right;font-size:13px;color:#475569;">
+                <div style="color:{'#166534' if pick.intraday_change_pct >= 0 else '#b91c1c'};">Open {_fmt_pct(pick.intraday_change_pct)}</div>
+                <div>Vol {pick.intraday_volume_ratio:.2f}x</div>
+              </div>
+            </div>
             """
         )
 
@@ -328,39 +374,23 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
             <p style="margin:0;font-size:15px;opacity:0.9;">Generated at {generated_at}. Ranked with daily trend, intraday move, VWAP, and volume.</p>
           </div>
 
-          <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:20px;">
-            {''.join(summary_cards)}
+          <div style="background:#ffffff;border-radius:24px;padding:24px;margin-top:20px;box-shadow:0 10px 30px rgba(15,23,42,0.08);">
+            <h2 style="margin:0 0 6px;font-size:24px;">1-Week Trade Plans</h2>
+            <p style="margin:0;color:#475569;">The top setups below show suggested entry, stop, and 1-week target levels for faster decision-making.</p>
+            <div style="display:flex;gap:16px;flex-wrap:wrap;margin-top:18px;">
+              {''.join(summary_cards)}
+            </div>
           </div>
 
-          <div style="background:#ffffff;border-radius:24px;padding:20px;margin-top:20px;box-shadow:0 10px 30px rgba(15,23,42,0.08);">
-            <h2 style="margin:0 0 6px;font-size:22px;">Full ranked table</h2>
-            <p style="margin:0 0 18px;color:#475569;">All symbols from the watchlist are included below, not just the top picks.</p>
-            <table style="width:100%;border-collapse:collapse;font-size:14px;">
-              <thead>
-                <tr style="background:#eff6ff;text-align:left;">
-                  <th style="padding:12px;border-bottom:1px solid #bfdbfe;">Symbol</th>
-                  <th style="padding:12px;border-bottom:1px solid #bfdbfe;">Action</th>
-                  <th style="padding:12px;border-bottom:1px solid #bfdbfe;">Score</th>
-                  <th style="padding:12px;border-bottom:1px solid #bfdbfe;">Last</th>
-                  <th style="padding:12px;border-bottom:1px solid #bfdbfe;">From Open</th>
-                  <th style="padding:12px;border-bottom:1px solid #bfdbfe;">Vs Prior Close</th>
-                  <th style="padding:12px;border-bottom:1px solid #bfdbfe;">Intraday Vol</th>
-                  <th style="padding:12px;border-bottom:1px solid #bfdbfe;">VWAP Gap</th>
-                  <th style="padding:12px;border-bottom:1px solid #bfdbfe;">Reason</th>
-                </tr>
-              </thead>
-              <tbody>
-                {''.join(rows)}
-              </tbody>
-            </table>
-          </div>
-
-          <div style="background:#ffffff;border-radius:24px;padding:20px;margin-top:20px;box-shadow:0 10px 30px rgba(15,23,42,0.08);">
-            <h2 style="margin:0 0 10px;font-size:22px;">Charts</h2>
-            <p style="margin:0 0 18px;color:#475569;">Attached charts show score ranking and intraday momentum versus volume for the entire watchlist.</p>
+          <div style="background:#ffffff;border-radius:24px;padding:24px;margin-top:20px;box-shadow:0 10px 30px rgba(15,23,42,0.08);">
+            <h2 style="margin:0 0 8px;font-size:24px;">Graph Scoreboard</h2>
+            <p style="margin:0 0 18px;color:#475569;">The chart-first scoreboard highlights rank, momentum, and volume without relying on a dense table.</p>
             <div style="display:flex;gap:16px;flex-wrap:wrap;">
               <img src="cid:scores_chart" alt="Score ranking" style="max-width:100%;width:500px;border-radius:16px;border:1px solid #e2e8f0;" />
               <img src="cid:momentum_chart" alt="Momentum versus volume" style="max-width:100%;width:500px;border-radius:16px;border:1px solid #e2e8f0;" />
+            </div>
+            <div style="margin-top:18px;">
+              {''.join(scoreboard_cards)}
             </div>
           </div>
         </div>
@@ -508,6 +538,9 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
       action string,
       score number,
       last_price float,
+      entry float,
+      stop_loss float,
+      target float,
       from_open_pct float,
       vs_prior_close_pct float,
       return_5d_pct float,
@@ -526,6 +559,9 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
       action,
       score,
       last_price,
+      entry,
+      stop_loss,
+      target,
       from_open_pct,
       vs_prior_close_pct,
       return_5d_pct,
@@ -535,7 +571,7 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
       vwap_gap_pct,
       reason
     )
-    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     rows = [tuple(row) for row in upload_df.itertuples(index=False, name=None)]

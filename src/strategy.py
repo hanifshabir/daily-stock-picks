@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pandas as pd
+
 
 @dataclass(frozen=True)
 class SymbolHistory:
@@ -28,6 +30,9 @@ class PickResult:
     volume_ratio: float
     intraday_volume_ratio: float
     vwap_distance_pct: float
+    entry_price: float
+    stop_loss: float
+    target_price: float
     reason: str
 
 
@@ -38,6 +43,10 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _clamp_price(value: float, floor: float = 0.01) -> float:
+    return max(round(value, 2), floor)
 
 
 def classify_action(score: int) -> str:
@@ -66,6 +75,19 @@ def score_symbol(
     daily["avg_volume20"] = daily["Volume"].rolling(20).mean()
     daily["return_5d"] = daily["Close"].pct_change(5)
     daily["return_20d"] = daily["Close"].pct_change(20)
+    previous_close = daily["Close"].shift(1)
+    true_range = (
+        pd.concat(
+            [
+                daily["High"] - daily["Low"],
+                (daily["High"] - previous_close).abs(),
+                (daily["Low"] - previous_close).abs(),
+            ],
+            axis=1,
+        )
+        .max(axis=1)
+    )
+    daily["atr14"] = true_range.rolling(14).mean()
 
     daily_row = daily.iloc[-1]
     sma20 = _safe_float(daily_row["sma20"])
@@ -75,6 +97,7 @@ def score_symbol(
     return_20d = _safe_float(daily_row["return_20d"])
     avg_volume20 = _safe_float(daily_row["avg_volume20"])
     daily_volume = _safe_float(daily_row["Volume"])
+    atr14 = _safe_float(daily_row["atr14"], max(close * 0.025, 1.0))
     volume_ratio = daily_volume / avg_volume20 if avg_volume20 else 0.0
 
     intraday = None
@@ -254,12 +277,30 @@ def score_symbol(
     if return_20d > 0.20 and return_5d < 0:
         score -= 4
 
+    entry_anchor = last_price
+    if vwap_distance_pct > 0 and traded_intraday is not None and not traded_intraday.empty:
+        entry_anchor = min(last_price, _safe_float(traded_intraday.iloc[-1]["vwap"], last_price))
+
+    if action := classify_action(score):
+        if action == "Buy Watch":
+            entry_price = _clamp_price(max(entry_anchor, last_price - 0.20 * atr14))
+            stop_loss = _clamp_price(entry_price - 1.00 * atr14)
+            target_price = _clamp_price(entry_price + 1.50 * atr14)
+        elif action == "Watch":
+            entry_price = _clamp_price(max(entry_anchor, last_price - 0.35 * atr14))
+            stop_loss = _clamp_price(entry_price - 0.90 * atr14)
+            target_price = _clamp_price(entry_price + 1.20 * atr14)
+        else:
+            entry_price = _clamp_price(last_price)
+            stop_loss = _clamp_price(last_price - 0.80 * atr14)
+            target_price = _clamp_price(last_price + 0.80 * atr14)
+
     reason = ", ".join(reasons) if reasons else "no strong intraday signal"
 
     return PickResult(
         symbol=symbol,
         score=score,
-        action=classify_action(score),
+        action=action,
         last_price=last_price,
         open_price=open_price,
         day_change_pct=day_change_pct,
@@ -271,5 +312,8 @@ def score_symbol(
         volume_ratio=volume_ratio,
         intraday_volume_ratio=intraday_volume_ratio,
         vwap_distance_pct=vwap_distance_pct,
+        entry_price=entry_price,
+        stop_loss=stop_loss,
+        target_price=target_price,
         reason=reason,
     )
