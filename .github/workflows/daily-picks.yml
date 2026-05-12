@@ -3,12 +3,8 @@ name: Daily Stock Picks
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions schedules use UTC.
-    # These run four times on trading weekdays during the U.S. session.
-    - cron: "0 14 * * 1-5"
-    - cron: "0 16 * * 1-5"
-    - cron: "0 18 * * 1-5"
-    - cron: "0 20 * * 1-5"
+    # GitHub Actions schedules use UTC. 08:00 UTC is 09:00 in the UK during BST.
+    - cron: "0 8 * * *"
 
 jobs:
   run-daily-picks:
