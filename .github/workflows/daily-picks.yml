@@ -4,10 +4,8 @@ on:
   workflow_dispatch:
   schedule:
     # GitHub Actions schedules use UTC.
-    # These run four times on trading weekdays during the U.S. session.
+    # These run twice on trading weekdays during the U.S. session.
     - cron: "0 14 * * 1-5"
-    - cron: "0 16 * * 1-5"
-    - cron: "0 18 * * 1-5"
     - cron: "0 20 * * 1-5"
 
 jobs:
