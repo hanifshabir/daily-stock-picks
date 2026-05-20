@@ -14,6 +14,17 @@ class SymbolHistory:
     sample_size: int = 0
 
 
+@dataclass(frozen=True)
+class MarketContext:
+    trend_positive: bool = False
+    intraday_positive: bool = False
+    spy_return_5d: float = 0.0
+    spy_return_20d: float = 0.0
+    spy_intraday_change_pct: float = 0.0
+    spy_day_change_pct: float = 0.0
+    spy_rsi14: float = 50.0
+
+
 @dataclass
 class PickResult:
     symbol: str
@@ -27,9 +38,12 @@ class PickResult:
     sma50: float
     return_5d: float
     return_20d: float
+    daily_rsi14: float
     volume_ratio: float
     intraday_volume_ratio: float
     vwap_distance_pct: float
+    relative_strength_5d: float
+    relative_strength_20d: float
     entry_price: float
     stop_loss: float
     daily_target_price: float
@@ -64,6 +78,7 @@ def score_symbol(
     daily_df,
     intraday_df,
     history: SymbolHistory | None = None,
+    market_context: MarketContext | None = None,
 ) -> PickResult | None:
     if daily_df is None or daily_df.empty or len(daily_df) < 60:
         return None
@@ -77,6 +92,13 @@ def score_symbol(
     daily["avg_volume20"] = daily["Volume"].rolling(20).mean()
     daily["return_5d"] = daily["Close"].pct_change(5)
     daily["return_20d"] = daily["Close"].pct_change(20)
+    delta = daily["Close"].diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.rolling(14).mean()
+    avg_loss = losses.rolling(14).mean()
+    rs = avg_gain / avg_loss.replace(0, pd.NA)
+    daily["rsi14"] = 100 - (100 / (1 + rs))
     previous_close = daily["Close"].shift(1)
     true_range = (
         pd.concat(
@@ -97,10 +119,12 @@ def score_symbol(
     close = _safe_float(daily_row["Close"])
     return_5d = _safe_float(daily_row["return_5d"])
     return_20d = _safe_float(daily_row["return_20d"])
+    daily_rsi14 = _safe_float(daily_row["rsi14"], 50.0)
     avg_volume20 = _safe_float(daily_row["avg_volume20"])
     daily_volume = _safe_float(daily_row["Volume"])
     atr14 = _safe_float(daily_row["atr14"], max(close * 0.025, 1.0))
     volume_ratio = daily_volume / avg_volume20 if avg_volume20 else 0.0
+    atr_pct = atr14 / close if close else 0.0
 
     intraday = None
     if intraday_df is not None and not intraday_df.empty:
@@ -159,6 +183,9 @@ def score_symbol(
     reasons: list[str] = []
     score_breakdown: list[str] = []
     history = history or SymbolHistory()
+    market_context = market_context or MarketContext()
+    relative_strength_5d = return_5d - market_context.spy_return_5d
+    relative_strength_20d = return_20d - market_context.spy_return_20d
 
     if last_price > sma20:
         score += 12
@@ -205,6 +232,21 @@ def score_symbol(
     elif return_20d < 0:
         score -= 6
         score_breakdown.append("-6 negative 20-day momentum")
+
+    if 55 <= daily_rsi14 <= 68:
+        score += 6
+        reasons.append("healthy daily RSI")
+        score_breakdown.append("+6 healthy daily RSI")
+    elif 68 < daily_rsi14 <= 75:
+        score += 3
+        reasons.append("firm daily RSI")
+        score_breakdown.append("+3 firm daily RSI")
+    elif daily_rsi14 > 78:
+        score -= 6
+        score_breakdown.append("-6 overextended daily RSI")
+    elif daily_rsi14 < 45:
+        score -= 6
+        score_breakdown.append("-6 weak daily RSI")
 
     if volume_ratio >= 1.2:
         score += 7
@@ -275,6 +317,40 @@ def score_symbol(
         score -= 8
         score_breakdown.append("-8 trading below VWAP")
 
+    if relative_strength_5d >= 0.03:
+        score += 6
+        reasons.append("outperforming SPY over 5 days")
+        score_breakdown.append("+6 outperforming SPY over 5 days")
+    elif relative_strength_5d >= 0.01:
+        score += 3
+        score_breakdown.append("+3 modest 5-day outperformance versus SPY")
+    elif relative_strength_5d <= -0.03:
+        score -= 6
+        score_breakdown.append("-6 lagging SPY over 5 days")
+
+    if relative_strength_20d >= 0.05:
+        score += 4
+        reasons.append("outperforming SPY over 20 days")
+        score_breakdown.append("+4 outperforming SPY over 20 days")
+    elif relative_strength_20d <= -0.05:
+        score -= 4
+        score_breakdown.append("-4 lagging SPY over 20 days")
+
+    if market_context.trend_positive:
+        score += 4
+        reasons.append("supportive market regime")
+        score_breakdown.append("+4 supportive market regime")
+    else:
+        score -= 6
+        score_breakdown.append("-6 weak market regime")
+
+    if market_context.intraday_positive:
+        score += 2
+        score_breakdown.append("+2 supportive market intraday tape")
+    else:
+        score -= 3
+        score_breakdown.append("-3 weak market intraday tape")
+
     if history.sample_size >= 2:
         if history.prev_buy_rate_3 >= 0.67:
             score += 12
@@ -321,6 +397,12 @@ def score_symbol(
     if return_20d > 0.20 and return_5d < 0:
         score -= 4
         score_breakdown.append("-4 long trend strong but short-term fade")
+    if intraday_change_pct > max(0.025, 1.2 * atr_pct) and vwap_distance_pct > 0.01:
+        score -= 6
+        score_breakdown.append("-6 intraday move is becoming overextended")
+    if daily_rsi14 > 75 and vwap_distance_pct > 0.01:
+        score -= 6
+        score_breakdown.append("-6 high RSI and stretched above VWAP")
 
     entry_anchor = last_price
     if vwap_distance_pct > 0 and traded_intraday is not None and not traded_intraday.empty:
@@ -357,9 +439,12 @@ def score_symbol(
         sma50=sma50,
         return_5d=return_5d,
         return_20d=return_20d,
+        daily_rsi14=daily_rsi14,
         volume_ratio=volume_ratio,
         intraday_volume_ratio=intraday_volume_ratio,
         vwap_distance_pct=vwap_distance_pct,
+        relative_strength_5d=relative_strength_5d,
+        relative_strength_20d=relative_strength_20d,
         entry_price=entry_price,
         stop_loss=stop_loss,
         daily_target_price=daily_target_price,

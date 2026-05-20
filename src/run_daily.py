@@ -14,7 +14,7 @@ import requests
 import snowflake.connector
 import yfinance as yf
 
-from strategy import PickResult, SymbolHistory, score_symbol
+from strategy import MarketContext, PickResult, SymbolHistory, score_symbol
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -94,6 +94,9 @@ def build_dataframe(results: list[PickResult]) -> pd.DataFrame:
             "Vs Prior Close %": round(pick.day_change_pct * 100, 2),
             "5D %": round(pick.return_5d * 100, 2),
             "20D %": round(pick.return_20d * 100, 2),
+            "RSI 14": round(pick.daily_rsi14, 1),
+            "Rel 5D %": round(pick.relative_strength_5d * 100, 2),
+            "Rel 20D %": round(pick.relative_strength_20d * 100, 2),
             "Daily Vol x": round(pick.volume_ratio, 2),
             "Intraday Vol x": round(pick.intraday_volume_ratio, 2),
             "VWAP Gap %": round(pick.vwap_distance_pct * 100, 2),
@@ -123,6 +126,9 @@ def prepare_snowflake_dataframe(results_df: pd.DataFrame, generated_at_iso: str)
         "vs_prior_close_pct",
         "return_5d_pct",
         "return_20d_pct",
+        "daily_rsi14",
+        "relative_strength_5d",
+        "relative_strength_20d",
         "daily_volume_ratio",
         "intraday_volume_ratio",
         "vwap_gap_pct",
@@ -144,6 +150,9 @@ def prepare_snowflake_dataframe(results_df: pd.DataFrame, generated_at_iso: str)
             "vs_prior_close_pct",
             "return_5d_pct",
             "return_20d_pct",
+            "daily_rsi14",
+            "relative_strength_5d",
+            "relative_strength_20d",
             "daily_volume_ratio",
             "intraday_volume_ratio",
             "vwap_gap_pct",
@@ -151,6 +160,38 @@ def prepare_snowflake_dataframe(results_df: pd.DataFrame, generated_at_iso: str)
         ]
     ]
     return upload_df
+
+
+def build_market_context() -> MarketContext:
+    daily_history = fetch_daily_history("SPY")
+    intraday_history = fetch_intraday_history("SPY")
+    spy_result = score_symbol("SPY", daily_history, intraday_history)
+    if spy_result is None:
+        log_status("MARKET", "Unable to build SPY market context; using neutral regime.")
+        return MarketContext()
+
+    trend_positive = (
+        spy_result.last_price > spy_result.sma20
+        and spy_result.sma20 >= spy_result.sma50
+        and spy_result.return_5d > 0
+    )
+    intraday_positive = spy_result.intraday_change_pct > 0 and spy_result.day_change_pct > 0
+    context = MarketContext(
+        trend_positive=trend_positive,
+        intraday_positive=intraday_positive,
+        spy_return_5d=spy_result.return_5d,
+        spy_return_20d=spy_result.return_20d,
+        spy_intraday_change_pct=spy_result.intraday_change_pct,
+        spy_day_change_pct=spy_result.day_change_pct,
+        spy_rsi14=spy_result.daily_rsi14,
+    )
+    regime = "supportive" if trend_positive else "weak"
+    tape = "positive" if intraday_positive else "mixed"
+    log_status(
+        "MARKET",
+        f"SPY regime is {regime}; intraday tape is {tape}; SPY RSI {spy_result.daily_rsi14:.1f}.",
+    )
+    return context
 
 
 def load_symbol_history(limit_runs: int = 3) -> dict[str, SymbolHistory]:
@@ -218,6 +259,74 @@ def load_symbol_history(limit_runs: int = 3) -> dict[str, SymbolHistory]:
     return history_by_symbol
 
 
+def backfill_outcome_columns(connection, table: str) -> None:
+    select_sql = f"""
+    select run_ts, symbol, last_price
+    from {table}
+    where close_return_same_day is null
+       or next_day_return is null
+       or forward_5d_return is null
+    order by run_ts desc
+    """
+    pending_df = pd.read_sql(select_sql, connection)
+    if pending_df.empty:
+        log_status("OUTCOMES", "No pending outcome rows to update.")
+        return
+
+    pending_df["RUN_TS"] = pd.to_datetime(pending_df["RUN_TS"])
+    symbols = sorted(set(pending_df["SYMBOL"]))
+    history_cache: dict[str, pd.DataFrame] = {}
+    for symbol in symbols:
+        history_cache[symbol] = fetch_daily_history(symbol)
+
+    updates: list[tuple[float | None, float | None, float | None, str, str]] = []
+    for row in pending_df.itertuples(index=False):
+        history = history_cache.get(row.SYMBOL)
+        if history is None or history.empty:
+            continue
+
+        trade_dates = list(pd.to_datetime(history.index).date)
+        closes = history["Close"].tolist()
+        signal_date = row.RUN_TS.date()
+        if signal_date not in trade_dates:
+            continue
+
+        idx = trade_dates.index(signal_date)
+        last_price = float(row.LAST_PRICE)
+        same_day_close = float(closes[idx]) if idx < len(closes) else None
+        next_day_close = float(closes[idx + 1]) if idx + 1 < len(closes) else None
+        forward_5d_close = float(closes[idx + 5]) if idx + 5 < len(closes) else None
+
+        same_day_return = ((same_day_close - last_price) / last_price) if same_day_close and last_price else None
+        next_day_return = ((next_day_close - last_price) / last_price) if next_day_close and last_price else None
+        forward_5d_return = ((forward_5d_close - last_price) / last_price) if forward_5d_close and last_price else None
+        updates.append(
+            (
+                same_day_return,
+                next_day_return,
+                forward_5d_return,
+                str(row.RUN_TS.strftime("%Y-%m-%d %H:%M:%S")),
+                row.SYMBOL,
+            )
+        )
+
+    if not updates:
+        log_status("OUTCOMES", "No outcome values were ready to backfill.")
+        return
+
+    update_sql = f"""
+    update {table}
+    set close_return_same_day = %s,
+        next_day_return = %s,
+        forward_5d_return = %s
+    where run_ts = %s
+      and symbol = %s
+    """
+    with connection.cursor() as cursor:
+        cursor.executemany(update_sql, updates)
+    log_status("OUTCOMES", f"Backfilled outcomes for {len(updates)} rows.")
+
+
 def run_optional_step(stage: str, description: str, callback, *args, **kwargs) -> None:
     log_status(stage, description)
     try:
@@ -276,6 +385,9 @@ def build_report(results: list[PickResult], generated_at: str) -> str:
                 f"- Vs prior close: {_fmt_pct(pick.day_change_pct)}",
                 f"- 5-day momentum: {_fmt_pct(pick.return_5d)}",
                 f"- 20-day momentum: {_fmt_pct(pick.return_20d)}",
+                f"- Daily RSI(14): {pick.daily_rsi14:.1f}",
+                f"- Relative strength vs SPY (5D): {_fmt_pct(pick.relative_strength_5d)}",
+                f"- Relative strength vs SPY (20D): {_fmt_pct(pick.relative_strength_20d)}",
                 f"- Daily volume ratio: {pick.volume_ratio:.2f}x",
                 f"- Intraday volume ratio: {pick.intraday_volume_ratio:.2f}x",
                 f"- VWAP gap: {_fmt_pct(pick.vwap_distance_pct)}",
@@ -351,6 +463,7 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
                 <div>From open {_fmt_pct(pick.intraday_change_pct)}</div>
                 <div>VWAP {_fmt_pct(pick.vwap_distance_pct)}</div>
                 <div>Vol {pick.intraday_volume_ratio:.2f}x</div>
+                <div>RSI {pick.daily_rsi14:.1f}</div>
               </div>
               <div style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.12);">
                 <div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.75;">Why It Scored Here</div>
@@ -378,6 +491,7 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
               <div style="text-align:right;font-size:13px;color:#475569;">
                 <div style="color:{'#166534' if pick.intraday_change_pct >= 0 else '#b91c1c'};">Open {_fmt_pct(pick.intraday_change_pct)}</div>
                 <div>Vol {pick.intraday_volume_ratio:.2f}x</div>
+                <div>RSI {pick.daily_rsi14:.1f}</div>
               </div>
             </div>
             """
@@ -565,10 +679,16 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
       vs_prior_close_pct float,
       return_5d_pct float,
       return_20d_pct float,
+      daily_rsi14 float,
+      relative_strength_5d float,
+      relative_strength_20d float,
       daily_volume_ratio float,
       intraday_volume_ratio float,
       vwap_gap_pct float,
-      reason string
+      reason string,
+      close_return_same_day float,
+      next_day_return float,
+      forward_5d_return float
     )
     """
 
@@ -587,12 +707,15 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
       vs_prior_close_pct,
       return_5d_pct,
       return_20d_pct,
+      daily_rsi14,
+      relative_strength_5d,
+      relative_strength_20d,
       daily_volume_ratio,
       intraday_volume_ratio,
       vwap_gap_pct,
       reason
     )
-    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+    values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     rows = [tuple(row) for row in upload_df.itertuples(index=False, name=None)]
@@ -602,6 +725,13 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
             log_status("SNOWFLAKE", f"Ensuring table {table} exists.")
             cursor.execute(create_table_sql)
             cursor.execute(f"alter table {table} add column if not exists daily_target float")
+            cursor.execute(f"alter table {table} add column if not exists daily_rsi14 float")
+            cursor.execute(f"alter table {table} add column if not exists relative_strength_5d float")
+            cursor.execute(f"alter table {table} add column if not exists relative_strength_20d float")
+            cursor.execute(f"alter table {table} add column if not exists close_return_same_day float")
+            cursor.execute(f"alter table {table} add column if not exists next_day_return float")
+            cursor.execute(f"alter table {table} add column if not exists forward_5d_return float")
+            backfill_outcome_columns(connection, table)
             log_status("SNOWFLAKE", f"Inserting {len(rows)} rows into {table}.")
             cursor.executemany(insert_sql, rows)
         log_status("SNOWFLAKE", f"Uploaded {len(rows)} rows to table {table}.")
@@ -619,6 +749,7 @@ def main() -> int:
     symbols = load_watchlist()
     log_status("SETUP", f"Loaded {len(symbols)} symbols from watchlist.")
     symbol_history = load_symbol_history()
+    market_context = build_market_context()
     results: list[PickResult] = []
     total_symbols = len(symbols)
     for index, symbol in enumerate(symbols, start=1):
@@ -631,6 +762,7 @@ def main() -> int:
                 daily_history,
                 intraday_history,
                 history=symbol_history.get(symbol),
+                market_context=market_context,
             )
             if result is not None:
                 results.append(result)
