@@ -13,12 +13,14 @@ The workflow currently expects these secrets:
 - `SNOWFLAKE_DATABASE`
 - `SNOWFLAKE_SCHEMA`
 - `SNOWFLAKE_TABLE`
+- `SNOWFLAKE_BACKFILL_OUTCOMES`
 
 Current values in use:
 
 - Database: `STOCK_PICKS`
 - Schema: `PUBLIC`
 - Default table: `STOCK_PICKS_DAILY`
+- Outcome backfill in scheduled runs: `false`
 
 ## Recreation DDL
 
@@ -102,5 +104,6 @@ The outcome columns are backfilled after runs when enough later price data exist
 
 - The writer lives in [src/run_daily.py](/Users/malikhanif/Documents/Codex/2026-05-05-can-you-access-my-github/repo/src/run_daily.py:643).
 - Snowflake writes are optional and are skipped when required secrets are missing.
-- The first run after adding outcome fields can take longer because it backfills prior rows.
+- Outcome backfill is now opt-in. Scheduled runs should keep `SNOWFLAKE_BACKFILL_OUTCOMES=false` so they only insert the current run.
+- If you want to backfill old rows later, run with `SNOWFLAKE_BACKFILL_OUTCOMES=true`.
 - If the Snowflake integration is removed later, keep this file and the GitHub secrets list as the recreation reference.

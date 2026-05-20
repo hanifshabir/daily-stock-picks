@@ -327,6 +327,11 @@ def backfill_outcome_columns(connection, table: str) -> None:
     log_status("OUTCOMES", f"Backfilled outcomes for {len(updates)} rows.")
 
 
+def should_backfill_outcomes() -> bool:
+    value = os.getenv("SNOWFLAKE_BACKFILL_OUTCOMES", "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
 def run_optional_step(stage: str, description: str, callback, *args, **kwargs) -> None:
     log_status(stage, description)
     try:
@@ -731,7 +736,11 @@ def write_results_to_snowflake(upload_df: pd.DataFrame) -> None:
             cursor.execute(f"alter table {table} add column if not exists close_return_same_day float")
             cursor.execute(f"alter table {table} add column if not exists next_day_return float")
             cursor.execute(f"alter table {table} add column if not exists forward_5d_return float")
-            backfill_outcome_columns(connection, table)
+            if should_backfill_outcomes():
+                log_status("OUTCOMES", "Outcome backfill enabled for this run.")
+                backfill_outcome_columns(connection, table)
+            else:
+                log_status("OUTCOMES", "Outcome backfill disabled; inserting current run only.")
             log_status("SNOWFLAKE", f"Inserting {len(rows)} rows into {table}.")
             cursor.executemany(insert_sql, rows)
         log_status("SNOWFLAKE", f"Uploaded {len(rows)} rows to table {table}.")
