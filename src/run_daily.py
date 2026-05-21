@@ -22,6 +22,66 @@ OUTPUT_DIR = ROOT / "output"
 CHART_DIR = OUTPUT_DIR / "charts"
 WATCHLIST_PATH = ROOT / "watchlist.json"
 MARKET_TZ = ZoneInfo("America/New_York")
+COMPANY_NAMES = {
+    "AAPL": "Apple",
+    "NOW": "ServiceNow",
+    "MSFT": "Microsoft",
+    "NVDA": "NVIDIA",
+    "AMZN": "Amazon",
+    "META": "Meta Platforms",
+    "GOOGL": "Alphabet",
+    "TSLA": "Tesla",
+    "AMD": "Advanced Micro Devices",
+    "AVGO": "Broadcom",
+    "TSM": "Taiwan Semiconductor",
+    "WMT": "Walmart",
+    "BRK-B": "Berkshire Hathaway",
+    "LLY": "Eli Lilly",
+    "JPM": "JPMorgan Chase",
+    "MU": "Micron Technology",
+    "XOM": "Exxon Mobil",
+    "V": "Visa",
+    "MA": "Mastercard",
+    "COST": "Costco",
+    "UNH": "UnitedHealth Group",
+    "HD": "Home Depot",
+    "BAC": "Bank of America",
+    "ABBV": "AbbVie",
+    "KO": "Coca-Cola",
+    "PM": "Philip Morris",
+    "GE": "GE Aerospace",
+    "CAT": "Caterpillar",
+    "WFC": "Wells Fargo",
+    "IBM": "IBM",
+    "TMUS": "T-Mobile",
+    "MCD": "McDonald's",
+    "LIN": "Linde",
+    "HON": "Honeywell",
+    "GS": "Goldman Sachs",
+    "INTU": "Intuit",
+    "MS": "Morgan Stanley",
+    "AMAT": "Applied Materials",
+    "BKNG": "Booking Holdings",
+    "PGR": "Progressive",
+    "DIS": "Walt Disney",
+    "C": "Citigroup",
+    "TXN": "Texas Instruments",
+    "QCOM": "Qualcomm",
+    "NKE": "Nike",
+    "RTX": "RTX",
+    "SPGI": "S&P Global",
+    "ADI": "Analog Devices",
+    "PEP": "PepsiCo",
+    "TJX": "TJX Companies",
+    "MDT": "Medtronic",
+    "NFLX": "Netflix",
+    "PLTR": "Palantir",
+    "CRM": "Salesforce",
+    "ADBE": "Adobe",
+    "ORCL": "Oracle",
+    "UBER": "Uber",
+    "SHOP": "Shopify",
+}
 
 
 def log_status(stage: str, message: str) -> None:
@@ -361,6 +421,10 @@ def _fmt_money(value: float) -> str:
     return f"${value:.2f}"
 
 
+def display_name(symbol: str) -> str:
+    return COMPANY_NAMES.get(symbol, symbol)
+
+
 def build_report(results: list[PickResult], generated_at: str) -> str:
     lines = [
         "# Intraday Stock Picks",
@@ -380,6 +444,7 @@ def build_report(results: list[PickResult], generated_at: str) -> str:
         lines.extend(
             [
                 f"## {idx}. {pick.symbol} ({pick.action})",
+                f"- Company: {display_name(pick.symbol)}",
                 f"- Score: {pick.score}",
                 f"- Last price: ${pick.last_price:.2f}",
                 f"- Suggested entry: {_fmt_money(pick.entry_price)}",
@@ -405,7 +470,7 @@ def build_report(results: list[PickResult], generated_at: str) -> str:
     lines.append("")
     for pick in results:
         lines.append(
-            f"- {pick.symbol}: {pick.action}, score {pick.score}, "
+            f"- {pick.symbol} ({display_name(pick.symbol)}): {pick.action}, score {pick.score}, "
             f"entry {_fmt_money(pick.entry_price)}, "
             f"daily target {_fmt_money(pick.daily_target_price)}, "
             f"target {_fmt_money(pick.target_price)}, "
@@ -438,6 +503,7 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
                 <div>
                   <div style="font-size:12px;letter-spacing:0.08em;text-transform:uppercase;opacity:0.75;">Weekly setup</div>
                   <div style="font-size:28px;font-weight:800;margin-top:4px;">{pick.symbol}</div>
+                  <div style="font-size:14px;opacity:0.82;margin-top:4px;">{display_name(pick.symbol)}</div>
                 </div>
                 <div style="font-size:34px;font-weight:900;">{pick.score}</div>
               </div>
@@ -489,6 +555,7 @@ def build_html_report(results: list[PickResult], generated_at: str) -> str:
               <div>
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
                   <div style="font-size:18px;font-weight:800;color:#0f172a;">{pick.symbol}</div>
+                  <div style="font-size:13px;color:#64748b;">{display_name(pick.symbol)}</div>
                   <div>{action_badge(pick.action)}</div>
                 </div>
                 <div style="margin-top:6px;font-size:13px;color:#475569;">Entry {_fmt_money(pick.entry_price)} · Day {_fmt_money(pick.daily_target_price)} · 1W {_fmt_money(pick.target_price)} · Stop {_fmt_money(pick.stop_loss)}</div>
